@@ -290,5 +290,316 @@ class CovarianceValidationTests(ApiTestCase):
                           "covariance[0][0]")
 
 
+class ConditioningSuccessTests(ApiTestCase):
+    CONDITIONING = {
+        "observations": [
+            {"id": "r1", "value": "2", "coefficients": {"x1": "1"}},
+            {"id": "r2", "value": "0", "coefficients": {"x2": "1"}},
+        ],
+        "noise_covariance": [["1", "0"], ["0", "1"]],
+    }
+
+    def test_conditional_result(self):
+        status, body = self.post(
+            "/api/uncertainty/evaluate",
+            dict(VALID_BODY, conditioning=self.CONDITIONING))
+        self.assertEqual(status, 200)
+        self.assertEqual(body, {
+            "estimate": "2629/714",
+            "variance": "107/119",
+            "exceeds_budget": False,
+        })
+
+    def test_conditional_budget_verdict_uses_conditional_variance(self):
+        payload = dict(VALID_BODY, conditioning=self.CONDITIONING,
+                       variance_budget="1/2")
+        status, body = self.post("/api/uncertainty/evaluate", payload)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["variance"], "107/119")
+        self.assertIs(body["exceeds_budget"], True)
+
+    def test_zero_noise_pins_observation_exactly(self):
+        conditioning = {
+            "observations": [
+                {"id": "r1", "value": "2", "coefficients": {"x1": "1"}}],
+            "noise_covariance": [["0"]],
+        }
+        status, body = self.post(
+            "/api/uncertainty/evaluate",
+            dict(VALID_BODY, conditioning=conditioning))
+        self.assertEqual(status, 200)
+        # A Sigma = [1/4, 1/8]; S = 1/4; gain on x1 = 1 (zero noise).
+        # E[x2|r1] = -1/4 + (1/8)/(1/4)*(2 - 3/2) = -1/4 + (1/2)*(1/2) = 0
+        # estimate = 1/2 + 2*2 + 1/3*0 = 9/2
+        self.assertEqual(body["estimate"], "9/2")
+        # variance: prior 11/9; reduction (A Sigma c)^2/S with
+        # A Sigma c = 2*1/4 + 1/3*1/8 = 13/24, squared / (1/4) = 169/144
+        # 11/9 - 169/144 = 7/144
+        self.assertEqual(body["variance"], "7/144")
+        self.assertIs(body["exceeds_budget"], False)
+
+    def test_null_conditioning_is_ignored(self):
+        status, body = self.post(
+            "/api/uncertainty/evaluate",
+            dict(VALID_BODY, conditioning=None))
+        self.assertEqual(status, 200)
+        self.assertEqual(body["estimate"], "41/12")
+        self.assertEqual(body["variance"], "11/9")
+
+    def test_four_observations_accepted(self):
+        conditioning = {
+            "observations": [
+                {"id": "r%d" % r, "value": "1",
+                 "coefficients": {"x1": "1", "x2": "1/2"}}
+                for r in range(4)],
+            "noise_covariance": [
+                ["1" if i == j else "0" for j in range(4)]
+                for i in range(4)],
+        }
+        status, body = self.post(
+            "/api/uncertainty/evaluate",
+            dict(VALID_BODY, conditioning=conditioning))
+        self.assertEqual(status, 200)
+        for key in ("estimate", "variance", "exceeds_budget"):
+            self.assertIn(key, body)
+
+
+class ConditioningValidationTests(ApiTestCase):
+    def test_conditioning_not_object(self):
+        status, body = self.post(
+            "/api/uncertainty/evaluate",
+            dict(VALID_BODY, conditioning=[]))
+        self.assert_error(status, body, "INVALID_SCHEMA", "conditioning")
+
+    def test_missing_observations(self):
+        status, body = self.post(
+            "/api/uncertainty/evaluate",
+            dict(VALID_BODY,
+                 conditioning={"noise_covariance": [["1"]]}))
+        self.assert_error(status, body, "INVALID_SCHEMA",
+                          "conditioning.observations")
+
+    def test_missing_noise_covariance(self):
+        status, body = self.post(
+            "/api/uncertainty/evaluate",
+            dict(VALID_BODY, conditioning={"observations": [
+                {"id": "r1", "value": "1", "coefficients": {"x1": "1"}}]}))
+        self.assert_error(status, body, "INVALID_SCHEMA",
+                          "conditioning.noise_covariance")
+
+    def test_zero_observations(self):
+        status, body = self.post(
+            "/api/uncertainty/evaluate",
+            dict(VALID_BODY, conditioning={
+                "observations": [], "noise_covariance": []}))
+        self.assert_error(status, body, "INVALID_SCHEMA",
+                          "conditioning.observations")
+
+    def test_five_observations(self):
+        obs = [{"id": "r%d" % i, "value": "1",
+                "coefficients": {"x1": "1"}} for i in range(5)]
+        status, body = self.post(
+            "/api/uncertainty/evaluate",
+            dict(VALID_BODY, conditioning={
+                "observations": obs,
+                "noise_covariance": [["1"] * 5] * 5}))
+        self.assert_error(status, body, "INVALID_SCHEMA",
+                          "conditioning.observations")
+
+    def test_observations_not_array(self):
+        status, body = self.post(
+            "/api/uncertainty/evaluate",
+            dict(VALID_BODY, conditioning={
+                "observations": {}, "noise_covariance": []}))
+        self.assert_error(status, body, "INVALID_SCHEMA",
+                          "conditioning.observations")
+
+    def test_observation_not_object(self):
+        status, body = self.post(
+            "/api/uncertainty/evaluate",
+            dict(VALID_BODY, conditioning={
+                "observations": [5], "noise_covariance": [["1"]]}))
+        self.assert_error(status, body, "INVALID_SCHEMA",
+                          "conditioning.observations[0]")
+
+    def test_observation_missing_key(self):
+        status, body = self.post(
+            "/api/uncertainty/evaluate",
+            dict(VALID_BODY, conditioning={
+                "observations": [{"id": "r1", "value": "1"}],
+                "noise_covariance": [["1"]]}))
+        self.assert_error(status, body, "INVALID_SCHEMA",
+                          "conditioning.observations[0]")
+
+    def test_duplicate_observation_ids(self):
+        status, body = self.post(
+            "/api/uncertainty/evaluate",
+            dict(VALID_BODY, conditioning={
+                "observations": [
+                    {"id": "r", "value": "1", "coefficients": {"x1": "1"}},
+                    {"id": "r", "value": "2", "coefficients": {"x2": "1"}}],
+                "noise_covariance": [["1", "0"], ["0", "1"]]}))
+        self.assert_error(status, body, "INVALID_SCHEMA",
+                          "conditioning.observations[1].id")
+
+    def test_empty_observation_id(self):
+        status, body = self.post(
+            "/api/uncertainty/evaluate",
+            dict(VALID_BODY, conditioning={
+                "observations": [
+                    {"id": "", "value": "1", "coefficients": {"x1": "1"}}],
+                "noise_covariance": [["1"]]}))
+        self.assert_error(status, body, "INVALID_SCHEMA",
+                          "conditioning.observations[0].id")
+
+    def test_invalid_observation_value(self):
+        status, body = self.post(
+            "/api/uncertainty/evaluate",
+            dict(VALID_BODY, conditioning={
+                "observations": [
+                    {"id": "r1", "value": "1.5",
+                     "coefficients": {"x1": "1"}}],
+                "noise_covariance": [["1"]]}))
+        self.assert_error(status, body, "INVALID_RATIONAL",
+                          "conditioning.observations[0].value")
+
+    def test_coefficients_not_object(self):
+        status, body = self.post(
+            "/api/uncertainty/evaluate",
+            dict(VALID_BODY, conditioning={
+                "observations": [
+                    {"id": "r1", "value": "1", "coefficients": [1]}],
+                "noise_covariance": [["1"]]}))
+        self.assert_error(status, body, "INVALID_SCHEMA",
+                          "conditioning.observations[0].coefficients")
+
+    def test_coefficients_empty(self):
+        status, body = self.post(
+            "/api/uncertainty/evaluate",
+            dict(VALID_BODY, conditioning={
+                "observations": [
+                    {"id": "r1", "value": "1", "coefficients": {}}],
+                "noise_covariance": [["1"]]}))
+        self.assert_error(status, body, "INVALID_SCHEMA",
+                          "conditioning.observations[0].coefficients")
+
+    def test_coefficient_unknown_input(self):
+        status, body = self.post(
+            "/api/uncertainty/evaluate",
+            dict(VALID_BODY, conditioning={
+                "observations": [
+                    {"id": "r1", "value": "1",
+                     "coefficients": {"nope": "1"}}],
+                "noise_covariance": [["1"]]}))
+        self.assert_error(status, body, "UNKNOWN_INPUT_REFERENCE",
+                          "conditioning.observations[0].coefficients.nope")
+
+    def test_coefficient_invalid_rational(self):
+        status, body = self.post(
+            "/api/uncertainty/evaluate",
+            dict(VALID_BODY, conditioning={
+                "observations": [
+                    {"id": "r1", "value": "1",
+                     "coefficients": {"x1": "2/4"}}],
+                "noise_covariance": [["1"]]}))
+        self.assert_error(status, body, "INVALID_RATIONAL",
+                          "conditioning.observations[0].coefficients.x1")
+
+    def test_noise_dimension_mismatch_rows(self):
+        status, body = self.post(
+            "/api/uncertainty/evaluate",
+            dict(VALID_BODY, conditioning={
+                "observations": [
+                    {"id": "r1", "value": "1", "coefficients": {"x1": "1"}},
+                    {"id": "r2", "value": "2", "coefficients": {"x2": "1"}}],
+                "noise_covariance": [["1"]]}))
+        self.assert_error(
+            status, body, "NOISE_COVARIANCE_DIMENSION_MISMATCH",
+            "conditioning.noise_covariance")
+
+    def test_noise_dimension_mismatch_row_length(self):
+        status, body = self.post(
+            "/api/uncertainty/evaluate",
+            dict(VALID_BODY, conditioning={
+                "observations": [
+                    {"id": "r1", "value": "1", "coefficients": {"x1": "1"}},
+                    {"id": "r2", "value": "2", "coefficients": {"x2": "1"}}],
+                "noise_covariance": [["1", "0"], ["0"]]}))
+        self.assert_error(
+            status, body, "NOISE_COVARIANCE_DIMENSION_MISMATCH",
+            "conditioning.noise_covariance[1]")
+
+    def test_noise_not_symmetric(self):
+        status, body = self.post(
+            "/api/uncertainty/evaluate",
+            dict(VALID_BODY, conditioning={
+                "observations": [
+                    {"id": "r1", "value": "1", "coefficients": {"x1": "1"}},
+                    {"id": "r2", "value": "2", "coefficients": {"x2": "1"}}],
+                "noise_covariance": [["1", "1/2"], ["1/3", "1"]]}))
+        self.assert_error(
+            status, body, "NOISE_COVARIANCE_NOT_SYMMETRIC",
+            "conditioning.noise_covariance[0][1]")
+
+    def test_noise_not_psd(self):
+        status, body = self.post(
+            "/api/uncertainty/evaluate",
+            dict(VALID_BODY, conditioning={
+                "observations": [
+                    {"id": "r1", "value": "1", "coefficients": {"x1": "1"}},
+                    {"id": "r2", "value": "2", "coefficients": {"x2": "1"}}],
+                "noise_covariance": [["1", "2"], ["2", "1"]]}))
+        self.assert_error(
+            status, body, "NOISE_COVARIANCE_NOT_POSITIVE_SEMIDEFINITE",
+            "conditioning.noise_covariance[1][1]")
+
+    def test_noise_bad_rational(self):
+        status, body = self.post(
+            "/api/uncertainty/evaluate",
+            dict(VALID_BODY, conditioning={
+                "observations": [
+                    {"id": "r1", "value": "1", "coefficients": {"x1": "1"}}],
+                "noise_covariance": [["1/0"]]}))
+        self.assert_error(
+            status, body, "INVALID_RATIONAL",
+            "conditioning.noise_covariance[0][0]")
+
+    def test_degenerate_zero_noise_on_unobserved_direction_rejected(self):
+        # Sigma = [[0,0],[0,1/2]] (valid PSD); observing x1 with zero noise
+        # gives S = [0] -> the reference carries no unique information.
+        payload = dict(VALID_BODY, covariance=[["0", "0"], ["0", "1/2"]],
+                       conditioning={
+            "observations": [
+                {"id": "r1", "value": "1", "coefficients": {"x1": "1"}}],
+            "noise_covariance": [["0"]]})
+        status, body = self.post("/api/uncertainty/evaluate", payload)
+        self.assert_error(status, body, "REFERENCE_INFORMATION_NOT_UNIQUE",
+                          "conditioning.observations")
+
+    def test_degenerate_duplicate_noiseless_observation_rejected(self):
+        # Two observations of the exact same linear form, both noiseless:
+        # S = A Sigma A^T * [[1,1],[1,1]] is singular.
+        payload = dict(VALID_BODY, conditioning={
+            "observations": [
+                {"id": "r1", "value": "2", "coefficients": {"x1": "1"}},
+                {"id": "r2", "value": "3", "coefficients": {"x1": "1"}}],
+            "noise_covariance": [["0", "0"], ["0", "0"]]})
+        status, body = self.post("/api/uncertainty/evaluate", payload)
+        self.assert_error(status, body, "REFERENCE_INFORMATION_NOT_UNIQUE",
+                          "conditioning.observations")
+
+    def test_degenerate_conflicting_but_distinguishable_by_noise_ok(self):
+        # Same form twice but independent positive noise makes S definite,
+        # even though the readings conflict.
+        payload = dict(VALID_BODY, conditioning={
+            "observations": [
+                {"id": "r1", "value": "2", "coefficients": {"x1": "1"}},
+                {"id": "r2", "value": "3", "coefficients": {"x1": "1"}}],
+            "noise_covariance": [["1", "0"], ["0", "1"]]})
+        status, body = self.post("/api/uncertainty/evaluate", payload)
+        self.assertEqual(status, 200)
+        self.assertNotIn("error", body)
+
+
 if __name__ == "__main__":
     unittest.main()

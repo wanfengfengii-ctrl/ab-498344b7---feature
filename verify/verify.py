@@ -4,8 +4,9 @@
 Runs, in order:
   1. code tests      -- the unit test suite
   2. application build -- byte-compile + import check of the application
-  3. HTTP smoke      -- valid and invalid covariance requests against the
-                        already-healthy API container
+  3. HTTP smoke      -- compatible requests, valid conditioning, degenerate
+                        reference combinations, and valid/invalid covariance
+                        requests against the already-healthy API container
 
 Every step is recorded; the process exits 0 only if all steps pass.
 """
@@ -206,6 +207,51 @@ def run_step_smoke() -> bool:
     ok &= check_error(
         "smoke: malformed JSON rejected",
         None, "MALFORMED_JSON", None, raw=b"{not json")
+
+    # -- conditioning -------------------------------------------------------
+    conditioned = dict(VALID_PAYLOAD, conditioning={
+        "observations": [
+            {"id": "r1", "value": "2", "coefficients": {"x1": "1"}},
+            {"id": "r2", "value": "0", "coefficients": {"x2": "1"}},
+        ],
+        "noise_covariance": [["1", "0"], ["0", "1"]]})
+    ok &= check_success(
+        "smoke: compatible request (no conditioning) unchanged",
+        VALID_PAYLOAD,
+        {"estimate": "41/12", "variance": "11/9", "exceeds_budget": False})
+    ok &= check_success(
+        "smoke: valid conditioning updates estimate and variance",
+        conditioned,
+        {"estimate": "2629/714", "variance": "107/119", "exceeds_budget": False})
+    ok &= check_success(
+        "smoke: conditional verdict uses conditional variance",
+        dict(conditioned, variance_budget="1/2"),
+        {"estimate": "2629/714", "variance": "107/119", "exceeds_budget": True})
+    ok &= check_error(
+        "smoke: degenerate reference combination rejected",
+        dict(VALID_PAYLOAD, conditioning={
+            "observations": [
+                {"id": "r1", "value": "2", "coefficients": {"x1": "1"}},
+                {"id": "r2", "value": "3", "coefficients": {"x1": "1"}}],
+            "noise_covariance": [["0", "0"], ["0", "0"]]}),
+        "REFERENCE_INFORMATION_NOT_UNIQUE", "conditioning.observations")
+    ok &= check_error(
+        "smoke: conditioning coefficient referencing unknown input rejected",
+        dict(VALID_PAYLOAD, conditioning={
+            "observations": [
+                {"id": "r1", "value": "1", "coefficients": {"nope": "1"}}],
+            "noise_covariance": [["1"]]}),
+        "UNKNOWN_INPUT_REFERENCE",
+        "conditioning.observations[0].coefficients.nope")
+    ok &= check_error(
+        "smoke: non-PSD reference noise covariance rejected",
+        dict(VALID_PAYLOAD, conditioning={
+            "observations": [
+                {"id": "r1", "value": "1", "coefficients": {"x1": "1"}},
+                {"id": "r2", "value": "2", "coefficients": {"x2": "1"}}],
+            "noise_covariance": [["1", "2"], ["2", "1"]]}),
+        "NOISE_COVARIANCE_NOT_POSITIVE_SEMIDEFINITE",
+        "conditioning.noise_covariance[1][1]")
 
     return ok
 
