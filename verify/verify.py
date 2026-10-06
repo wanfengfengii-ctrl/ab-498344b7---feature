@@ -4,8 +4,11 @@
 Runs, in order:
   1. code tests      -- the unit test suite
   2. application build -- byte-compile + import check of the application
-  3. HTTP smoke      -- valid and invalid covariance requests against the
-                        already-healthy API container
+  3. HTTP smoke      -- valid and invalid covariance requests, requests
+                        without conditioning (compatible), with valid
+                        conditioning and with degenerate reference
+                        combinations against the already-healthy API
+                        container
 
 Every step is recorded; the process exits 0 only if all steps pass.
 """
@@ -206,6 +209,47 @@ def run_step_smoke() -> bool:
     ok &= check_error(
         "smoke: malformed JSON rejected",
         None, "MALFORMED_JSON", None, raw=b"{not json")
+
+    # -- conditioning ---------------------------------------------------------
+    # Compatible request: no 'conditioning' key, verdict unchanged.
+    ok &= check_success(
+        "smoke: compatible request without conditioning",
+        {
+            "inputs": [{"id": "a", "value": 5, "sensitivity": 1}],
+            "covariance": [[4]],
+            "intercept": 0,
+            "variance_budget": 4,
+        },
+        {"estimate": "5", "variance": "4", "exceeds_budget": False})
+
+    # Valid conditioning: z = x1 observed as 2 with noise variance 1/4.
+    conditioned = dict(VALID_PAYLOAD, conditioning={
+        "observations": [
+            {"id": "r1", "value": "2", "coefficients": {"x1": "1"}},
+        ],
+        "covariance": [["1/4"]],
+    })
+    ok &= check_success(
+        "smoke: valid conditioning updates estimate and variance",
+        conditioned,
+        {"estimate": "95/24", "variance": "61/96", "exceeds_budget": False})
+    ok &= check_success(
+        "smoke: valid conditioning, budget exceeded",
+        dict(conditioned, variance_budget="1/2"),
+        {"estimate": "95/24", "variance": "61/96", "exceeds_budget": True})
+
+    # Degenerate reference combination: two identical noiseless observations
+    # make H*S*H^T + R singular, so no unique conditional result exists.
+    ok &= check_error(
+        "smoke: degenerate reference combination rejected",
+        dict(VALID_PAYLOAD, conditioning={
+            "observations": [
+                {"id": "r1", "value": "2", "coefficients": {"x1": "1"}},
+                {"id": "r2", "value": "2", "coefficients": {"x1": "1"}},
+            ],
+            "covariance": [["0", "0"], ["0", "0"]],
+        }),
+        "CONDITIONING_SINGULAR", "conditioning")
 
     return ok
 

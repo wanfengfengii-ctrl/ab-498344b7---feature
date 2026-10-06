@@ -20,6 +20,10 @@ from .errors import ApiError
 EVALUATE_PATH = "/api/uncertainty/evaluate"
 HEALTH_PATH = "/healthz"
 MAX_BODY_BYTES = 1 << 20  # 1 MiB is far more than 24 inputs ever need.
+# Bodies only marginally over the cap are drained before the 413 response so
+# the verdict reliably reaches clients that are still sending; absurdly large
+# declared bodies are rejected and the connection is closed instead.
+MAX_DRAIN_BYTES = 4 << 20
 
 _JSON = "application/json"
 
@@ -50,6 +54,17 @@ class RequestHandler(BaseHTTPRequestHandler):
     def _send_api_error(self, error: ApiError) -> None:
         self._send_json(error.status, error.payload())
 
+    def _discard_body(self, length: int) -> None:
+        """Read and discard ``length`` body bytes so the connection stays
+        usable and the error response is not lost under a still-sending
+        client."""
+        remaining = length
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, 1 << 16))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+
     def _read_body(self) -> bytes:
         """Read the request body, enforcing the size cap."""
         length_header = self.headers.get("Content-Length")
@@ -62,6 +77,10 @@ class RequestHandler(BaseHTTPRequestHandler):
         if length < 0:
             raise ApiError("MALFORMED_JSON", "invalid Content-Length header")
         if length > MAX_BODY_BYTES:
+            if length <= MAX_DRAIN_BYTES:
+                self._discard_body(length)
+            else:
+                self.close_connection = True
             raise ApiError("PAYLOAD_TOO_LARGE",
                            "request body exceeds %d bytes" % MAX_BODY_BYTES,
                            status=413)

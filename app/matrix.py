@@ -26,6 +26,39 @@ def check_symmetric(matrix: Sequence[Sequence[Fraction]]) -> Optional[Tuple[int,
     return None
 
 
+def invert(matrix: Sequence[Sequence[Fraction]]) -> Optional[Matrix]:
+    """Exact inverse of a square matrix over the rationals.
+
+    Uses Gauss-Jordan elimination with partial pivoting; every operation is
+    exact, so the result is exact.  Returns ``None`` when the matrix is
+    singular (no pivot in some column), in which case no unique solution
+    exists.
+    """
+    n = len(matrix)
+    aug = [
+        list(matrix[i]) + [Fraction(1) if i == j else Fraction(0)
+                           for j in range(n)]
+        for i in range(n)
+    ]
+    for col in range(n):
+        pivot_row = None
+        for r in range(col, n):
+            if aug[r][col] != 0:
+                pivot_row = r
+                break
+        if pivot_row is None:
+            return None
+        if pivot_row != col:
+            aug[col], aug[pivot_row] = aug[pivot_row], aug[col]
+        inv_pivot = 1 / aug[col][col]
+        aug[col] = [value * inv_pivot for value in aug[col]]
+        for r in range(n):
+            if r != col and aug[r][col] != 0:
+                factor = aug[r][col]
+                aug[r] = [a - factor * b for a, b in zip(aug[r], aug[col])]
+    return [row[n:] for row in aug]
+
+
 def psd_failure_index(matrix: Sequence[Sequence[Fraction]]) -> Optional[int]:
     """Exact PSD test via LDL^T (symmetric Gaussian elimination).
 
